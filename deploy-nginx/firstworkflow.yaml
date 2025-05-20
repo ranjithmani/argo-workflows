@@ -1,0 +1,98 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: first-workflow
+spec:
+  serviceAccountName: workflow-sa
+  entrypoint: deploy-nginx
+  arguments:
+    parameters:
+    - name: namespace
+      value: web
+    - name: replicas
+      value: "2"
+  
+  templates:
+  - name: deploy-nginx
+    steps:
+    - - name: deploy-nginx
+        template: deploy-nginx-resource
+    - - name: expose-service
+        template: expose-service
+
+
+  - name: deploy-nginx-resource
+    resource:
+      action: create
+      manifest: |
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: nginx
+          namespace: {{workflow.parameters.namespace}}
+        spec:
+          replicas: {{workflow.parameters.replicas}}
+          selector:
+            matchLabels:
+              app: nginx
+          template:
+            metadata:
+              labels:
+                app: nginx
+            spec:
+              initContainers:
+              - name: minio
+                image: minio/mc:latest
+                command: ["sh", "-c"]
+                args: ["mc alias set myminio http://minio.minio.svc.cluster.local:9000 $MINIO_ACCESS_KEY $MINIO_SECRET_KEY && mc cp  --recursive myminio/uploads/ /data/ && chmod -R 755 /data "]
+                volumeMounts:
+                - name: data
+                  mountPath: /data
+                env:
+                - name: MINIO_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-creds
+                      key: accesskey
+                - name: MINIO_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-creds
+                      key: secretkey
+              containers:
+              - name: nginx
+                image: nginx:1.25
+                volumeMounts:
+                - name: data
+                  mountPath: /usr/share/nginx/html/
+                ports:
+                - containerPort: 80
+                resources:
+                  requests:
+                    cpu: "100m"
+                    memory: "128Mi"
+                  limits:
+                    cpu: "200m"
+                    memory: "256Mi"
+              volumes:
+              - name: data
+                emptyDir: {}
+
+  - name: expose-service
+    resource:
+      action: create
+      manifest: |
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: nginx
+          namespace: {{workflow.parameters.namespace}}
+        spec:
+          type: ClusterIP
+          ports:
+          - port: 80
+            targetPort: 80
+            protocol: TCP
+          selector:
+            app: nginx
